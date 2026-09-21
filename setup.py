@@ -1,18 +1,27 @@
 #!/usr/bin/env python
 from setuptools import setup, Extension, find_namespace_packages
 
+define_macros = [("CYTHON_FREETHREADING_COMPATIBLE", "1")]
+
 try:
     from Cython.Build import cythonize
+    from Cython.Compiler import Options
+
+    directives = {}
+    if getattr(Options, "directive_types", None) and "freethreading_compatible" in Options.directive_types:
+        directives["freethreading_compatible"] = True
+
     extensions = cythonize(
         [
-            Extension(name="pyteomics.cparser", sources=["pyteomics/cparser.pyx"]),
-            Extension(name="pyteomics.cmass", sources=["pyteomics/cmass.pyx"]),
-        ]
+            Extension(name="pyteomics.cparser", sources=["pyteomics/cparser.pyx"], define_macros=define_macros),
+            Extension(name="pyteomics.cmass", sources=["pyteomics/cmass.pyx"], define_macros=define_macros),
+        ],
+        compiler_directives=directives,
     )
 except ImportError:
     extensions = [
-        Extension(name="pyteomics.cparser", sources=["pyteomics/cparser.c"]),
-        Extension(name="pyteomics.cmass", sources=["pyteomics/cmass.c"]),
+        Extension(name="pyteomics.cparser", sources=["pyteomics/cparser.c"], define_macros=define_macros),
+        Extension(name="pyteomics.cmass", sources=["pyteomics/cmass.c"], define_macros=define_macros),
     ]
 
 

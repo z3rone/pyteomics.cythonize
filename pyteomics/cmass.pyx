@@ -1,5 +1,6 @@
 # cython: embedsignature=True
 # cython: profile=True
+# cython: freethreading_compatible=True
 #   Copyright 2016 Joshua Klein, Lev Levitsky
 #
 #   Licensed under the Apache License, Version 2.0 (the "License");

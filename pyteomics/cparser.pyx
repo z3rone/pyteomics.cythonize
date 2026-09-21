@@ -1,5 +1,6 @@
 # cython: embedsignature=True
 # cython: profile=False
+# cython: freethreading_compatible=True
 
 #   Copyright 2016 Joshua Klein, Lev Levitsky
 #
