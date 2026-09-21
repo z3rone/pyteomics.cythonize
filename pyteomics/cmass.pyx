@@ -82,6 +82,12 @@ cdef inline double get_mass(dict mass_data, object key):
     return mass
 
 
+if 'H-' not in _std_aa_mass:
+    _std_aa_mass['H-'] = get_mass(nist_mass, 'H')
+if '-OH' not in _std_aa_mass:
+    _std_aa_mass['-OH'] = get_mass(nist_mass, 'H') + get_mass(nist_mass, 'O')
+
+
 cpdef double fast_mass(str sequence, str ion_type=None, int charge=0,
                        dict mass_data=_nist_mass, dict aa_mass=_std_aa_mass,
                        dict ion_comp=_std_ion_comp):
@@ -694,16 +700,22 @@ cdef class CComposition(dict):
         '''
         Calculate the mass or m/z of a Composition.
         '''
-        cdef object mdid
+        cdef:
+            object mdid
+            tuple cached_args
+            double calculated_mass
+
         mdid = id(mass_data)
-        if self._mass_args is not None and average is self._mass_args[0]\
-                and charge == self._mass_args[1] and mdid == self._mass_args[2]\
-                and ion_type == self._mass_args[3]:
-            return self._mass
-        else:
+        with cython.critical_section(self):
+            cached_args = self._mass_args
+            if cached_args is not None and average is cached_args[0]\
+                    and charge == cached_args[1] and mdid == cached_args[2]\
+                    and ion_type == cached_args[3]:
+                return self._mass
+            calculated_mass = _calculate_mass(composition=self, average=average, charge=charge, mass_data=mass_data, ion_type=ion_type)
+            self._mass = calculated_mass
             self._mass_args = (average, charge, mdid, ion_type)
-            self._mass = _calculate_mass(composition=self, average=average, charge=charge, mass_data=mass_data, ion_type=ion_type)
-            return self._mass
+            return calculated_mass
 
     def __init__(self, *args, **kwargs):
         dict.__init__(self)
@@ -849,14 +861,14 @@ cdef double _calculate_mass(CComposition composition,
         mass : float
     """
     cdef:
-        int old_charge, isotope_num, isotope, quantity
-        double mass, isotope_mass, isotope_frequency
-        long _charge
+        int isotope_num, isotope, quantity
+        double mass, isotope_mass, isotope_frequency, proton_mass
+        long effective_charge, proton_count, proton_count_for_mass
         str isotope_string, element_name
         dict mass_provider
         CComposition ion_type_comp
         list key_list
-        PyObject* interm
+        PyObject* interim
         Py_ssize_t iter_pos = 0
 
     if mass_data is None:
@@ -865,29 +877,39 @@ cdef double _calculate_mass(CComposition composition,
         mass_provider = mass_data
 
     # Get charge.
+    proton_count = composition.getitem('H+')
     if charge is None:
-        charge = composition.getitem('H+')
+        effective_charge = proton_count
+        proton_count_for_mass = proton_count
     else:
-        if charge != 0 and composition.getitem('H+') != 0:
+        effective_charge = PyInt_AsLong(charge)
+        if effective_charge != 0 and proton_count != 0:
             raise PyteomicsError("Charge is specified both by the number of protons and parameters")
-    _charge = PyInt_AsLong(charge)
-    old_charge = composition.getitem('H+')
-    composition.setitem('H+', charge)
+        if effective_charge == 0 and proton_count != 0:
+            proton_count_for_mass = 0
+        else:
+            proton_count_for_mass = proton_count
 
     # Calculate mass.
     mass = 0.0
     key_list = PyDict_Keys(composition)
     for iter_pos in range(len(key_list)):
         isotope_string = <str>PyList_GET_ITEM(key_list, iter_pos)
-        # element_name, isotope_num = _parse_isotope_string(isotope_string)
         element_name = _parse_isotope_string(isotope_string, &isotope_num)
+
+        if isotope_string == 'H+':
+            quantity = <int>proton_count_for_mass
+        else:
+            quantity = <int>composition.getitem(isotope_string)
+
+        if quantity == 0:
+            continue
 
         # Calculate average mass if required and the isotope number is
         # not specified.
         if (not isotope_num) and average:
             for isotope in mass_provider[element_name]:
                 if isotope != 0:
-                    quantity = <int>composition.getitem(element_name)
                     isotope_mass = <double>mass_provider[element_name][isotope][0]
                     isotope_frequency = <double>mass_provider[element_name][isotope][1]
 
@@ -897,13 +919,20 @@ cdef double _calculate_mass(CComposition composition,
             interim = PyDict_GetItem(<dict>interim, isotope_num)
             isotope_mass = PyFloat_AsDouble(<object>PyTuple_GetItem(<tuple>interim, 0))
 
-            mass += (composition.getitem(isotope_string) * isotope_mass)
+            mass += quantity * isotope_mass
+
+    # If charge was specified and composition did not have 'H+', add protons
+    if charge is not None and effective_charge != 0 and proton_count == 0:
+        interim = PyDict_GetItem(mass_provider, 'H+')
+        interim = PyDict_GetItem(<dict>interim, 0)
+        proton_mass = PyFloat_AsDouble(<object>PyTuple_GetItem(<tuple>interim, 0))
+        mass += effective_charge * proton_mass
 
     if ion_type is not None:
-        interm = PyDict_GetItem(_std_ion_comp, ion_type)
-        if interm == NULL:
+        interim = PyDict_GetItem(_std_ion_comp, ion_type)
+        if interim == NULL:
             raise KeyError("Unknown ion_type: {}".format(ion_type))
-        ion_type_comp = <CComposition>interm
+        ion_type_comp = <CComposition>interim
         key_list = PyDict_Keys(ion_type_comp)
         for iter_pos in range(len(key_list)):
             isotope_string = <str>PyList_GET_ITEM(key_list, iter_pos)
@@ -926,16 +955,9 @@ cdef double _calculate_mass(CComposition composition,
 
                 mass += (ion_type_comp.getitem(isotope_string) * isotope_mass)
 
-
     # Calculate m/z if required.
-    if _charge != 0:
-        mass /= abs(_charge)
-
-
-    if old_charge != 0:
-        composition.setitem('H+', old_charge)
-    else:
-        PyDict_DelItem(composition, "H+")
+    if effective_charge != 0:
+        mass /= abs(effective_charge)
 
     return mass
 
